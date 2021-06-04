@@ -1,5 +1,6 @@
 package org.thp.thehive.controllers.v1
 
+import akka.stream.scaladsl.FileIO
 import org.apache.tinkerpop.gremlin.process.traversal.P
 import org.thp.scalligraph.controllers.{Entrypoint, FieldsParser}
 import org.thp.scalligraph.models.Database
@@ -11,8 +12,12 @@ import org.thp.thehive.controllers.v1.Conversion._
 import org.thp.thehive.dto.v1.{InputCase, InputTask}
 import org.thp.thehive.models._
 import org.thp.thehive.services._
+import play.api.http.HttpEntity
 import play.api.libs.json.{JsArray, JsNumber, JsObject}
-import play.api.mvc.{Action, AnyContent, Results}
+import play.api.mvc.{Action, AnyContent, ResponseHeader, Result, Results}
+
+import java.nio.file.Files
+import scala.concurrent.ExecutionContext.Implicits.global
 import scala.util.Success
 
 class CaseCtrl(
@@ -188,5 +193,34 @@ class CaseCtrl(
           }
 
         Success(Results.Ok(JsArray(relatedCases)))
+      }
+
+  def export(caseIdOrNumber: String): Action[AnyContent] =
+    entrypoint("export case")
+      .authRoTransaction(db) { implicit request => implicit graph =>
+        def caseRequest =
+          caseSrv
+            .get(EntityIdOrName(caseIdOrNumber))
+            .visible
+        for {
+          richCase <- caseRequest.richCase.getOrFail("Case")
+          obs   = caseRequest.observables.visible.richObservable.toList
+          tasks = caseRequest.tasks.visible.richTask.toList
+        } yield {
+          val file       = caseSrv.exportAsZip(richCase, obs, tasks)
+          val filename   = s"export-case-${richCase.number}.zip"
+          val filesize   = Files.size(file)
+          val fileStream = FileIO.fromPath(file).mapMaterializedValue(_.onComplete(_ => Files.deleteIfExists(file)))
+          Result(
+            header = ResponseHeader(
+              200,
+              Map(
+                "Content-Disposition"       -> s"""attachment; filename="$filename"""",
+                "Content-Transfer-Encoding" -> "binary"
+              )
+            ),
+            body = HttpEntity.Streamed(fileStream, Some(filesize), Some("application/zip"))
+          )
+        }
       }
 }

@@ -2,6 +2,9 @@ package org.thp.thehive.services
 
 import akka.actor.ActorRef
 import com.softwaremill.tagging.@@
+import net.lingala.zip4j.ZipFile
+import net.lingala.zip4j.model.ZipParameters
+import net.lingala.zip4j.model.enums.CompressionLevel
 import org.apache.tinkerpop.gremlin.process.traversal.{Order, P}
 import org.apache.tinkerpop.gremlin.structure.Vertex
 import org.thp.scalligraph.auth.{AuthContext, Permission}
@@ -17,9 +20,11 @@ import org.thp.thehive.dto.String64
 import org.thp.thehive.dto.v1.InputCustomFieldValue
 import org.thp.thehive.models._
 import play.api.cache.SyncCacheApi
-import play.api.libs.json.{JsNull, JsObject, Json}
+import play.api.libs.json.{JsNull, JsObject, JsValue, Json}
 
+import java.io.{ByteArrayInputStream, InputStream}
 import java.lang.{Long => JLong}
+import java.nio.file.{Files, Path}
 import java.util.{List => JList, Map => JMap}
 import scala.util.{Failure, Success, Try}
 
@@ -375,6 +380,35 @@ class CaseSrv(
       } yield richCase
     } else
       Failure(BadRequestError("To be able to merge, cases must have same organisation / profile pair and user must be org-admin"))
+
+  def exportAsZip(richCase: RichCase, observables: Seq[RichObservable], tasks: Seq[RichTask]): Path = {
+    val file = Files.createTempFile(s"export-case-${richCase.number}", "zip")
+    Files.delete(file)
+    val zipFile = new ZipFile(file.toFile)
+    def writeInZip(data: InputStream, filename: String): Unit = {
+      val zipParams = new ZipParameters
+      zipParams.setCompressionLevel(CompressionLevel.FASTEST)
+      zipParams.setFileNameInZip(filename)
+      zipFile.addStream(data, zipParams)
+    }
+    def jsonToInputStream(json: JsValue): InputStream = new ByteArrayInputStream(Json.prettyPrint(json).getBytes)
+
+    writeInZip(jsonToInputStream(richCase.toJson), "case.json")
+
+    observables.foreach { observable =>
+      writeInZip(jsonToInputStream(observable.toJson), s"observables/${observable._id}.json")
+      observable.attachment.foreach { attachement =>
+        val stream = attachmentSrv.stream(attachement)
+        writeInZip(stream, s"observables/${observable._id}/${attachement.name}")
+      }
+    }
+
+    tasks.foreach { task =>
+      writeInZip(jsonToInputStream(task.toJson), s"tasks/task-${task.order}.json")
+    }
+
+    file
+  }
 
   private def canMerge(cases: Seq[Case with Entity])(implicit graph: Graph, authContext: AuthContext): Boolean = {
     val allOrgProfiles = getByIds(cases.map(_._id): _*)
